@@ -5,9 +5,12 @@ import osqp
 from scipy import sparse
 import importlib
 from numba import jit
+import logging
 
 from controller.controller import Controller
+
 from dynamics.bilinear_lifted_dynamics import BilinearLiftedDynamics
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 @jit(nopython=True)
 def _update_objective(C, Q, QN, R, xr, x_init, u_init, const_offset, nx, nu, N):
@@ -68,134 +71,44 @@ def _update_current_sol(z_init, dz_flat, u_init, du_flat, u_init_flat, nx, nu, N
 
 
 class NonlinearMPCControllerNb(Controller):
-    """
-    Class for nonlinear MPC with control-affine dynamics.
-
-    Quadratic programs are solved using OSQP.
-    """
-
     def __init__(self, dynamics, N, dt, umin, umax, xmin, xmax, Q, R, QN, xr, solver_settings, const_offset=None,
                  terminal_constraint=False, add_slack=False, q_slack=1e3):
         """
         Initialize the nonlinear mpc class.
-        :param dynamics: (AffindeDynamics) dynamics object describing system dynamics
-        :param N: (int) Prediction horizon in number of timesteps
-        :param dt: (float) Time interval between time steps
-        :param umin: (np.array) Actuation lower bounds
-        :param umax: (np.array) Actuation upper bounds
-        :param xmin: (np.array) State lower bounds
-        :param xmax: (np.array) State upper bounds
-        :param Q: (sparse.csc_matrix) State deviation penalty matrix
-        :param R: (sparse.csc_matrix) Actuation penalty matrix
-        :param QN: (sparse.csc_matrix) Terminal state deviation penalty matrix
-        :param xr: (np.array) Desired state, setpoint
-        :param const_offset: (np.array) Constant offset of the control inputs
-        :param terminal_constraint: (boolean) Constrain terminal state to be xr
-        :param add_slack: (boolean) Add slack variables to state constraints
-        :param q_slack: (float) Penalty value of slack terms q||s||^2, where s are the slack variables
         """
+        try:
+            super().__init__(dynamics)
+            self.dynamics_object = dynamics
+            self.nx = dynamics.n
+            self.nu = dynamics.m
+            self.dt = dt
+            self.Q = Q
+            self.QN = QN
+            self.R = R
+            self.N = N
+            self.xr = xr
+            self.xmin = xmin
+            self.xmax = xmax
+            self.umin = umin
+            self.umax = umax
+            self.terminal_constraint = terminal_constraint
+            self.add_slack = add_slack
+            self.q_slack = q_slack
+            self.const_offset = const_offset if const_offset is not None else np.zeros((self.nu, 1))
 
-        Controller.__init__(self, dynamics)
+            if isinstance(dynamics, BilinearLiftedDynamics):
+                self.C = dynamics.C
+            else:
+                self.C = np.eye(self.nx)
+                dynamics.lift = lambda x, t: x  # Assuming a default lift function if not specified
 
-        self.dynamics_object = dynamics
-        self.nx = self.dynamics_object.n
-        self.nu = self.dynamics_object.m
-        self.dt = dt
-        if type(self.dynamics_object) == BilinearLiftedDynamics:
-            self.C = self.dynamics_object.C
-        else:
-            self.C = np.eye(self.nx)
-            self.dynamics_object.lift = lambda x, t: x
+            self.solver_settings = solver_settings
+            self.embed_pkg_str = f'nmpc_{self.nx}_{self.nu}_{self.N}'
+            logging.info("Nonlinear MPC Controller initialized successfully.")
+        except Exception as e:
+            logging.error("Failed to initialize NonlinearMPCControllerNb: %s", e)
+            raise
 
-        self.Q = Q
-        self.QN = QN
-        self.R = R
-        self.N = N
-        assert xr.ndim == 1, 'Desired trajectory not supported'
-        self.xr = xr
-        self.xmin = xmin
-        self.xmax = xmax
-        self.umin = umin
-        self.umax = umax
-
-        if self.dynamics_object.standardizer_x is not None:
-            self.xr = self.dynamics_object.standardizer_x.transform(self.xr.reshape(1,-1)).squeeze()
-            self.xmin = self.dynamics_object.standardizer_x.transform(self.xmin.reshape(1,-1)).squeeze()
-            self.xmax = self.dynamics_object.standardizer_x.transform(self.xmax.reshape(1,-1)).squeeze()
-
-        if self.dynamics_object.standardizer_u is not None:
-            self.const_offset = self.dynamics_object.standardizer_u.mean_.reshape(-1, 1)
-            self.umin = self.dynamics_object.standardizer_u.transform(self.umin.reshape(1, -1)).squeeze()
-            self.umax = self.dynamics_object.standardizer_u.transform(self.umax.reshape(1, -1)).squeeze()
-        elif const_offset is None:
-            self.const_offset = np.zeros((self.nu, 1))
-        else:
-            self.const_offset = const_offset
-
-        self.ns = xr.shape[0]
-        self.terminal_constraint = terminal_constraint
-
-        self.add_slack = add_slack
-        self.Q_slack = q_slack * sparse.eye(self.ns * (self.N))
-
-        self.solver_settings = solver_settings
-        self.embed_pkg_str = 'nmpc_' + str(self.nx) + '_' + str(self.nu) + '_' + str(self.N)
-
-        self.prep_time = []
-        self.qp_time = []
-        self.comp_time = []
-        self.x_iter = []
-        self.u_iter = []
-
-    def construct_controller(self, z_init, u_init):
-        """
-        Construct NMPC controller.
-        :param z_init: (np.array) Initial guess of z-solution
-        :param u_init: (np.array) Initial guess of u-solution
-        :return:
-        """
-        z0 = z_init[0, :]
-        self.z_init = z_init
-        if self.dynamics_object.standardizer_u is None:
-            self.u_init = u_init
-        else:
-            self.u_init = self.dynamics_object.standardizer_u.inverse_transform(u_init)
-        self.x_init = self.C @ z_init.T
-        self.u_init_flat = self.u_init.flatten()
-        self.x_init_flat = self.x_init.flatten(order='F')
-        #self.warm_start = np.zeros(self.nx*(self.N+1) + self.nu*self.N)
-
-        A_lst = [np.ones((self.nx, self.nx)) for _ in range(self.N)]
-        B_lst = [np.ones((self.nx, self.nu)) for _ in range(self.N)]
-        r_lst = [np.ones(self.nx) for _ in range(self.N)]
-        self.r_vec = np.array(r_lst).flatten()
-
-        self.construct_objective_()
-        self.construct_constraint_vecs_(z0, None)
-        self.construct_constraint_matrix_(A_lst, B_lst)
-        self.construct_constraint_matrix_data_(A_lst, B_lst)
-
-        # Create an OSQP object and setup workspace
-        self.prob = osqp.OSQP()
-        self.prob.setup(P=self._osqp_P, q=self._osqp_q, A=self._osqp_A, l=self._osqp_l, u=self._osqp_u, verbose=False,
-                        warm_start=self.solver_settings['warm_start'],
-                        polish=self.solver_settings['polish'],
-                        polish_refine_iter=self.solver_settings['polish_refine_iter'],
-                        check_termination=self.solver_settings['check_termination'],
-                        eps_abs=self.solver_settings['eps_abs'],
-                        eps_rel=self.solver_settings['eps_rel'],
-                        eps_prim_inf=self.solver_settings['eps_prim_inf'],
-                        eps_dual_inf=self.solver_settings['eps_dual_inf'],
-                        linsys_solver=self.solver_settings['linsys_solver'],
-                        adaptive_rho=self.solver_settings['adaptive_rho'])
-
-        self.Q = self.Q.toarray()
-        self.QN = self.QN.toarray()
-        self.R = self.R.toarray()
-        self.Q_slack = self.Q_slack.toarray()
-
-        if self.solver_settings['gen_embedded_ctrl']:
-            self.construct_embedded_controller()
 
     def update_solver_settings(self, solver_settings):
         """
@@ -218,17 +131,20 @@ class NonlinearMPCControllerNb(Controller):
                         eps_dual_inf=self.solver_settings['eps_dual_inf'],
                         linsys_solver=self.solver_settings['linsys_solver'])
 
-    def solve_to_convergence(self, z, t, z_init_0, u_init_0, eps=1e-3, max_iter=1):
-        """
-        Run SQP-algorithm to convergence
-        :param z: (np.array) Initial value of z
-        :param t: (float) Initial value of t (for time-dependent dynamics)
-        :param z_init_0: (np.array) Initial guess of z-solution
-        :param u_init_0: (np.array) Initial guess of u-solution
-        :param eps: (float) Stop criterion, normed difference of the control input sequence
-        :param max_iter: (int) Maximum SQP-iterations to run
-        :return:
-        """
+    import logging
+
+def solve_to_convergence(self, z, t, z_init_0, u_init_0, eps=1e-3, max_iter=1):
+    """
+    Run SQP-algorithm to convergence
+    :param z: (np.array) Initial value of z
+    :param t: (float) Initial value of t (for time-dependent dynamics)
+    :param z_init_0: (np.array) Initial guess of z-solution
+    :param u_init_0: (np.array) Initial guess of u-solution
+    :param eps: (float) Stop criterion, normed difference of the control input sequence
+    :param max_iter: (int) Maximum SQP-iterations to run
+    :return:
+    """
+    try:
         iter = 0
         self.cur_z = z_init_0
         if self.dynamics_object.standardizer_u is None:
@@ -268,14 +184,18 @@ class NonlinearMPCControllerNb(Controller):
             self.qp_time.append(self.comp_time[-1] - t_prep)
             self.x_iter.append(self.cur_z.copy().T)
             self.u_iter.append(self.cur_u.copy().T)
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+    
 
-    def eval(self, x, t):
-        """
-        Run single iteration of SQP-algorithm to get control signal in closed-loop control
-        :param x: (np.array) Current state
-        :param t: (float) Current time (for time-dependent dynamics)
-        :return: u: (np.array) Current control input
-        """
+def eval(self, x, t):
+    """
+    Run single iteration of SQP-algorithm to get control signal in closed-loop control
+    :param x: (np.array) Current state
+    :param t: (float) Current time (for time-dependent dynamics)
+    :return: u: (np.array) Current control input
+    """
+    try:
         t0 = time.time()
         z = self.dynamics_object.lift(x.reshape((1, -1)), None).squeeze()   # Not compiled with Numba
         self.update_initial_guess_()                                        # Not compiled with Numba
@@ -293,10 +213,19 @@ class NonlinearMPCControllerNb(Controller):
         self.prep_time.append(t_prep)
         self.qp_time.append(self.comp_time[-1] - t_prep)
 
+        # if self.dynamics_object.standardizer_u is None:
+        #     return self.cur_u[0, :]
+        # else:
+        #     return self.dynamics_object.standardizer_u.inverse_transform(self.cur_u[0, :])
+
         if self.dynamics_object.standardizer_u is None:
             return self.cur_u[0, :]
         else:
-            return self.dynamics_object.standardizer_u.inverse_transform(self.cur_u[0, :])
+            # Reshape the sliced array to 2D 
+            reshaped_data = self.cur_u[0, :].reshape(1, -1)
+            return self.dynamics_object.standardizer_u.inverse_transform(reshaped_data)
+    except Exception as e:
+        logging.error(f"An error occurred in eval method: {e}")
 
     def construct_objective_(self):
         """
@@ -304,40 +233,44 @@ class NonlinearMPCControllerNb(Controller):
         :return:
         """
         # Quadratic objective:
+        try: 
+            if not self.add_slack:
+                self._osqp_P = sparse.block_diag([sparse.kron(sparse.eye(self.N), self.C.T @ self.Q @ self.C),
+                                                self.C.T @ self.QN @ self.C,
+                                                sparse.kron(sparse.eye(self.N), self.R)], format='csc')
 
-        if not self.add_slack:
-            self._osqp_P = sparse.block_diag([sparse.kron(sparse.eye(self.N), self.C.T @ self.Q @ self.C),
-                                              self.C.T @ self.QN @ self.C,
-                                              sparse.kron(sparse.eye(self.N), self.R)], format='csc')
+            else:
+                self._osqp_P = sparse.block_diag([sparse.kron(sparse.eye(self.N), self.C.T @ self.Q @ self.C),
+                                                self.C.T @ self.QN @ self.C,
+                                                sparse.kron(sparse.eye(self.N), self.R),
+                                                self.Q_slack], format='csc')
 
-        else:
-            self._osqp_P = sparse.block_diag([sparse.kron(sparse.eye(self.N), self.C.T @ self.Q @ self.C),
-                                              self.C.T @ self.QN @ self.C,
-                                              sparse.kron(sparse.eye(self.N), self.R),
-                                              self.Q_slack], format='csc')
+            # Linear objective:
+            if not self.add_slack:
+                self._osqp_q = np.hstack(
+                    [(self.C.T @ self.Q @ (self.C @ self.z_init[:-1, :].T - self.xr.reshape(-1, 1))).flatten(order='F'),
+                    self.C.T @ self.QN @ (self.C @ self.z_init[-1, :] - self.xr),
+                    (self.R @ (self.u_init.T + self.const_offset)).flatten(order='F')])
 
-        # Linear objective:
-        if not self.add_slack:
-            self._osqp_q = np.hstack(
-                [(self.C.T @ self.Q @ (self.C @ self.z_init[:-1, :].T - self.xr.reshape(-1, 1))).flatten(order='F'),
-                 self.C.T @ self.QN @ (self.C @ self.z_init[-1, :] - self.xr),
-                 (self.R @ (self.u_init.T + self.const_offset)).flatten(order='F')])
-
-        else:
-            self._osqp_q = np.hstack(
-                [(self.C.T @ self.Q @ (self.C @ self.z_init[:-1, :].T - self.xr.reshape(-1, 1))).flatten(order='F'),
-                 self.C.T @ self.QN @ (self.C @ self.z_init[-1, :] - self.xr),
-                 (self.R @ (self.u_init.T + self.const_offset)).flatten(order='F'),
-                 np.zeros(self.ns * (self.N))])
+            else:
+                self._osqp_q = np.hstack(
+                    [(self.C.T @ self.Q @ (self.C @ self.z_init[:-1, :].T - self.xr.reshape(-1, 1))).flatten(order='F'),
+                    self.C.T @ self.QN @ (self.C @ self.z_init[-1, :] - self.xr),
+                    (self.R @ (self.u_init.T + self.const_offset)).flatten(order='F'),
+                    np.zeros(self.ns * (self.N))])
+        except Exception as e:
+            logging.error(f"An error occurred in construct_objective_ method: {e}")
 
     def update_objective_(self):
         """
         Construct MPC objective function
         :return:
         """
+        
         self._osqp_q[:self.nx * (self.N + 1) + self.nu * self.N] = \
             _update_objective(self.C, self.Q, self.QN, self.R, self.xr, self.x_init, self.u_init, self.const_offset.squeeze(),
                               self.nx, self.nu, self.N)
+        logging.debug("Objective function built")
 
     def construct_constraint_matrix_(self, A_lst, B_lst):
         """

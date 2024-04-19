@@ -1,6 +1,10 @@
 import numpy as np
 from numba import jit
 from controller.nonlinear_mpc_controller_numba import NonlinearMPCControllerNb
+import logging
+
+# Ensure logging is configured if not already set up elsewhere in your application
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 @jit(nopython=True)
 def _update_linearization(A_flat, B_flat, B_arr, z_init, u_init, nx, N):
@@ -24,40 +28,50 @@ class BilinearMPCControllerNb(NonlinearMPCControllerNb):
 
     def __init__(self, dynamics, N, dt, umin, umax, xmin, xmax, Q, R, QN, xr, solver_settings, const_offset=None,
                  terminal_constraint=False, add_slack=False, q_slack=1e3):
-
         super(BilinearMPCControllerNb, self).__init__(dynamics, N, dt, umin, umax, xmin, xmax, Q, R, QN, xr, solver_settings,
-                                        const_offset=const_offset,
-                                        terminal_constraint=terminal_constraint,
-                                        add_slack=add_slack,
-                                        q_slack=q_slack)
-
+                                                      const_offset=const_offset,
+                                                      terminal_constraint=terminal_constraint,
+                                                      add_slack=add_slack,
+                                                      q_slack=q_slack)
         self.embed_pkg_str = 'knmpc_' + str(self.nx) + '_' + str(self.nu) + '_' + str(self.N)
         self.A_flat = self.dynamics_object.A.flatten(order='F')
         self.B_flat = np.array([b.flatten(order='F') for b in self.dynamics_object.B])
         self.B_arr = np.vstack(self.dynamics_object.B).T
+        logging.info("BilinearMPCControllerNb initialized with configuration.")
 
     def update_constraint_matrix_data_(self, A_lst, B_lst):
+        logging.debug("Updating constraint matrix data.")
         self._osqp_A_data[self._osqp_A_data_A_inds] = A_lst
         self._osqp_A_data[self._osqp_A_data_B_inds] = B_lst
 
     def update_linearization_(self):
+        logging.debug("Updating linearization.")
         A_lst_flat, B_lst_flat, self.r_vec[:] = _update_linearization(self.A_flat, self.B_flat, self.B_arr,
-                                                                   self.z_init, self.u_init, self.nx, self.N)
-
+                                                                      self.z_init, self.u_init, self.nx, self.N)
         return A_lst_flat, B_lst_flat
 
     def get_state_prediction(self):
-        """
-        Get the state prediction from the MPC problem
-        :return: Z (np.array) current state prediction
-        """
-        if self.dynamics_object.standardizer_x is None:
-            return (self.dynamics_object.C@self.cur_z.T).T
-        else:
-            return self.dynamics_object.standardizer_x.inverse_transform((self.dynamics_object.C@self.cur_z.T).T)
+        """Get the state prediction from the MPC problem."""
+        try:
+            if self.dynamics_object.standardizer_x is None:
+                prediction = (self.dynamics_object.C @ self.cur_z.T).T
+            else:
+                prediction = self.dynamics_object.standardizer_x.inverse_transform((self.dynamics_object.C @ self.cur_z.T).T)
+            logging.debug("State prediction retrieved.")
+            return prediction
+        except Exception as e:
+            logging.error("Failed to retrieve state prediction", exc_info=True)
+            raise
 
     def get_control_prediction(self):
-        if self.dynamics_object.standardizer_u is None:
-            return self.cur_u
-        else:
-            return self.dynamics_object.standardizer_u.inverse_transform(self.cur_u)
+        """Get the control prediction from the MPC problem."""
+        try:
+            if self.dynamics_object.standardizer_u is None:
+                prediction = self.cur_u
+            else:
+                prediction = self.dynamics_object.standardizer_u.inverse_transform(self.cur_u)
+            logging.debug("Control prediction retrieved.")
+            return prediction
+        except Exception as e:
+            logging.error("Failed to retrieve control prediction", exc_info=True)
+            raise

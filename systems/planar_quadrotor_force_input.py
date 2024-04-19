@@ -9,50 +9,77 @@ from dynamics.system_dynamics import SystemDynamics
 
 from dynamics.robotic_dynamics import RoboticDynamics
 from dynamics.util import default_fig
+import logging
+
 
 class PlanarQuadrotorForceInput(RoboticDynamics):
     def __init__(self, m, J, b, g=9.81):
-        RoboticDynamics.__init__(self, 3,    2)
-        self.params = m, J, b, g
-        self.standardizer_u = None
-        self.standardizer_x = None
+        '''Create a PlanarQuadrotorForceInput object that satisfies the RoboticDynamics interface.'''
+        try:
+            super().__init__(3, 2)
+            self.params = m, J, b, g
+            self.standardizer_u = None
+            self.standardizer_x = None
+            logging.info("PlanarQuadrotorForceInput initialized with m=%s, J=%s, b=%s, g=%s", m, J, b, g)
+        except Exception as e:
+            logging.error("Failed to initialize PlanarQuadrotorForceInput: %s", e)
+            raise
 
     def D(self, q):
-        m, J, b, _ = self.params
-        return array([[m, 0, 0], [0, m, 0], [0, 0, J/b]])
+        '''Compute positive-definite inertia matrix.'''
+        try:
+            m, J, b, _ = self.params
+            inertia_matrix = array([[m, 0, 0], [0, m, 0], [0, 0, J/b]])
+            logging.debug("Inertia matrix computed: %s", inertia_matrix)
+            return inertia_matrix
+        except Exception as e:
+            logging.error("Failed to compute inertia matrix: %s", e)
+            raise
 
     def C(self, q, q_dot):
-        return zeros((3, 3))
+        '''Compute Coriolis terms.'''
+        try:
+            coriolis_matrix = zeros((3, 3))
+            logging.debug("Coriolis matrix computed: %s", coriolis_matrix)
+            return coriolis_matrix
+        except Exception as e:
+            logging.error("Failed to compute Coriolis matrix: %s", e)
+            raise
 
     def U(self, q):
-        m, _, _, g = self.params
-        _, z, _ = q
-        return m * g * z
+        '''Compute potential energy.'''
+        try:
+            m, _, _, g = self.params
+            _, z, _ = q
+            potential_energy = m * g * z
+            logging.debug("Potential energy computed: %s", potential_energy)
+            return potential_energy
+        except Exception as e:
+            logging.error("Failed to compute potential energy: %s", e)
+            raise
 
     def G(self, q):
-        m, _, _, g = self.params
-        return array([0, m * g, 0])
+        '''Compute conservative forces.'''
+        try:
+            m, _, _, g = self.params
+            conservative_forces = array([0, m * g, 0])
+            logging.debug("Conservative forces computed: %s", conservative_forces)
+            return conservative_forces
+        except Exception as e:
+            logging.error("Failed to compute conservative forces: %s", e)
+            raise
 
     def B(self, q):
-        _, _, theta = q
-        return array([[-sin(theta), -sin(theta)], [cos(theta), cos(theta)], [-1, 1]])
+        '''Compute actuation terms.'''
+        try:
+            _, _, theta = q
+            actuation_matrix = array([[-sin(theta), -sin(theta)], [cos(theta), cos(theta)], [-1, 1]])
+            logging.debug("Actuation matrix computed: %s", actuation_matrix)
+            return actuation_matrix
+        except Exception as e:
+            logging.error("Failed to compute actuation matrix: %s", e)
+            raise
 
-    def plot_coordinates(self, ts, qs, fig=None, ax=None, labels=None):
-        if fig is None:
-            fig = figure(figsize=(6, 6), tight_layout=True)
-
-        if ax is None:
-            ax = fig.add_subplot(1, 1, 1, projection='3d')
-
-        xs, zs, thetas = qs.T
-
-        ax.set_title('Coordinates', fontsize=16)
-        ax.set_xlabel('$x$ (m)', fontsize=16)
-        ax.set_ylabel('$\\theta$ (rad)', fontsize=16)
-        ax.set_zlabel('$z$ (m)', fontsize=16)
-        ax.plot(xs, thetas, zs, linewidth=3)
-
-        return fig, ax
 
     def plot_states(self, ts, xs, fig=None, ax=None, labels=None):
         fig, ax = default_fig(fig, ax)

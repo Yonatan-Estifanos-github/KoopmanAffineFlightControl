@@ -25,6 +25,28 @@ class Edmd():
         self.dt = dt
 
     def fit(self, X, y, cv=False, override_kinematics=False):
+        '''
+        Fits the model to the training data, with options for cross-validation and kinematic override.
+
+        Parameters:
+        - X: Input features, numpy array of shape (n_samples, n_features).
+        - y: Target values, numpy array of shape (n_samples, n_targets).
+        - cv: Perform cross-validation if True. Default is False.
+        - override_kinematics: If True, kinematic equations are overridden. Default is False.
+
+        Steps:
+        1. Adjust Targets: For discrete models, adjusts target values based on standardization.
+        2. Override Kinematics: If requested, modifies the target matrix to skip certain dynamics.
+        3. Cross-Validation: If cv is True, uses the specified cross-validation method to fit the model.
+        4. Fit Model: Fits the model using the optimizer or cross-validator to find coefficients.
+        5. Standardize Coefficients: If a standardizer is provided, applies it to the coefficients.
+        6. Update Model Dynamics: Constructs the A and B matrices from the coefficients, incorporating
+        any kinematic overrides and ensuring compatibility with the continuous/discrete nature of the model.
+
+        Returns:
+        - None. The function updates the model's internal state with the fitted parameters.
+        
+        '''
         if not self.continuous_mdl:
             y = y - self.standardizer.inverse_transform(X)[:,:self.n_lift]
 
@@ -68,6 +90,25 @@ class Edmd():
         #TODO: Add possibility of learning C-matrix.
 
     def process(self, x, u, t, downsample_rate=1):
+        '''
+        Process the input data.
+
+        Parameters:
+        - x: numpy array, shape (n_traj, n_samples, n_features)
+            The input features.
+        - u: numpy array, shape (n_traj, n_samples, n_targets)
+            The control inputs.
+        - t: numpy array, shape (n_traj, n_samples)
+            The time values.
+        - downsample_rate: int, default=1
+            The rate at which to downsample the processed data.
+
+        Returns:
+        - z_u_flat: numpy array, shape (n_lift + m, n_data_pts)
+            The flattened and downsampled input features and control inputs.
+        - z_prime_flat: numpy array, shape (n_lift, n_data_pts)
+            The flattened and downsampled lifted states.
+        '''
         assert x.shape[0] == self.n_traj
         assert x.shape[2] == self.n
 
@@ -90,20 +131,53 @@ class Edmd():
             z_u_flat, z_prime_flat = self.standardizer.transform(z_u_flat.T), z_prime_flat.T
 
         return z_u_flat[::downsample_rate,:], z_prime_flat[::downsample_rate,:]
+    
+    def plot(self, x, u, t, downsample_rate=1):
+        '''
+        Plot the processed data.
+
+        Parameters:
+        - x: numpy array, shape (n_traj, n_samples, n_features)
+            The input features.
+        - u: numpy array, shape (n_traj, n_samples, n_targets)
+            The control inputs.
+        - t: numpy array, shape (n_traj, n_samples)
+            The time values.
+        - downsample_rate: int, default=1
+            The rate at which to downsample the processed data.
+
+        Returns:
+        - None
+        '''
+        z_u_flat, z_prime_flat = self.process(x, u, t, downsample_rate)
+        # Add code to plot the processed data
 
     def predict(self, x, u):
-        """predict compute the right hand side of z_dot
-        
-        Arguments:
-            X {numpy array [Ns,Nt]} -- state        
-            U {numpy array [Nu,Nt]} -- control input
-        
+        '''
+        Predict the right hand side of z_dot.
+
+        Parameters:
+        - x: numpy array, shape (n_features, n_samples)
+            The state.
+        - u: numpy array, shape (n_targets, n_samples)
+            The control input.
+
         Returns:
-            numpy array [Ns,Nt] -- Az+Bu in z_dot = Az+Bu
-        """
+        - numpy array, shape (n_features, n_samples)
+            The predicted right hand side of z_dot.
+        '''
         return np.dot(self.C, np.dot(self.A, x) + np.dot(self.B, u))
 
     def reduce_mdl(self):
+        '''
+        Reduce the model by identifying the basis functions in use.
+
+        Parameters:
+        - None
+
+        Returns:
+        - None
+        '''
         # Identify what basis functions are in use:
         in_use = np.unique(np.nonzero(self.C)[1]) # Identify observables used for state prediction
         n_obs_used = 0
@@ -120,7 +194,32 @@ class Edmd():
         self.obs_in_use = in_use
 
     def score(self, x, u):
+        '''
+        Compute the score.
+
+        Parameters:
+        - x: numpy array, shape (n_features, n_samples)
+            The state.
+        - u: numpy array, shape (n_targets, n_samples)
+            The control input.
+
+        Returns:
+        - None
+        '''
         pass
 
     def lift(self, x, u):
+        '''
+        Lift the input data.
+
+        Parameters:
+        - x: numpy array, shape (n_samples, n_features)
+            The input features.
+        - u: numpy array, shape (n_samples, n_targets)
+            The control inputs.
+
+        Returns:
+        - numpy array, shape (n_samples, n_lift)
+            The lifted data.
+        '''
         return self.basis(x)

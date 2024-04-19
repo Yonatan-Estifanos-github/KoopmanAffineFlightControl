@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from . import KoopmanNet
+from learning.koopman_net import KoopmanNet
 import numpy as np
 
 class KoopmanNetCtrl(KoopmanNet):
